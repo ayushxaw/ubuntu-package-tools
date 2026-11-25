@@ -1,0 +1,86 @@
+#!/usr/bin/python3
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+from gi.repository import GLib
+
+
+def install(source):
+    if not source.is_file() or source.suffix.lower() != ".appimage":
+        raise ValueError("Choose a local .AppImage file.")
+
+    name = " ".join(source.stem.split()) or "AppImage"
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60] or "app"
+    suffix = hashlib.sha256(os.fsencode(source.name)).hexdigest()[:12]
+    app_id = f"appimage-{slug}-{suffix}"
+    app_dir = Path.home() / "Applications" / app_id
+    desktop_dir = Path(GLib.get_user_data_dir()) / "applications"
+    target = app_dir / "app.AppImage"
+    desktop_file = desktop_dir / f"{app_id}.desktop"
+
+    entry = GLib.KeyFile()
+    group = "Desktop Entry"
+    entry.set_string(group, "Type", "Application")
+    entry.set_string(group, "Name", name)
+    entry.set_string(group, "Icon", "application-x-executable")
+    # Desktop Entry Exec quoting is distinct from shell quoting.
+    exec_path = re.sub(r'([\\"$`])', r'\\\1', str(target)).replace("%", "%%")
+    entry.set_string(group, "Exec", f'"{exec_path}"')
+    entry.set_boolean(group, "Terminal", False)
+
+    with source.open("rb") as image:
+        if not stat.S_ISREG(os.fstat(image.fileno()).st_mode):
+            raise ValueError("Choose a regular .AppImage file.")
+        header = image.read(11)
+        if not header.startswith(b"\x7fELF") or header[8:11] not in (b"AI\x01", b"AI\x02"):
+            raise ValueError("This file does not look like an AppImage.")
+
+        app_dir.mkdir(parents=True, exist_ok=True)
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            TemporaryDirectory(dir=app_dir) as image_stage,
+            TemporaryDirectory(dir=desktop_dir) as shortcut_stage,
+        ):
+            staged_image = Path(image_stage) / target.name
+            staged_shortcut = Path(shortcut_stage) / desktop_file.name
+            with staged_image.open("wb") as output:
+                output.write(header)
+                shutil.copyfileobj(image, output)
+            staged_image.chmod(0o755)
+            entry.save_to_file(str(staged_shortcut))
+            staged_image.replace(target)
+            staged_shortcut.replace(desktop_file)
+
+    return name
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Add an AppImage to Ubuntu’s app menu.")
+    parser.add_argument("image", type=Path)
+    args = parser.parse_args()
+    try:
+        name = install(args.image)
+    except (OSError, ValueError, GLib.Error) as error:
+        subprocess.run([
+            "/usr/bin/zenity", "--error", "--title=AppImage Installer",
+            "--no-markup", f"--text={error}",
+        ], check=False)
+        return 1
+
+    subprocess.run([
+        "/usr/bin/zenity", "--info", "--title=AppImage Installed",
+        "--no-markup", f"--text=Search for {name} in your app menu.",
+    ], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

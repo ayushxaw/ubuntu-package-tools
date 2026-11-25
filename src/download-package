@@ -1,0 +1,74 @@
+#!/usr/bin/python3
+"""Download a .deb or AppImage from a direct HTTPS URL."""
+import argparse
+import os
+from pathlib import Path
+import shutil
+import sys
+from tempfile import TemporaryDirectory
+from urllib.parse import unquote, urlsplit
+from urllib.request import build_opener, HTTPRedirectHandler, Request
+
+from gi.repository import GLib
+
+
+class HTTPSRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != "https":
+            raise ValueError("The server tried to redirect outside HTTPS.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download(url, directory, filename=None):
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("Use a direct HTTPS download link.")
+    name = filename if filename is not None else unquote(parsed.path.rsplit("/", 1)[-1])
+    if not name or name != Path(name).name or any(ord(char) < 32 for char in name):
+        raise ValueError("Supply a filename with --name.")
+    suffix = Path(name).suffix.lower()
+    if suffix not in (".deb", ".appimage"):
+        raise ValueError("The filename must end in .deb or .AppImage.")
+    destination = directory / name
+    if os.path.lexists(destination):
+        raise FileExistsError(f"Already exists: {destination}")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    request = Request(url, headers={"User-Agent": "UbuntuPackageInstaller/1.0"})
+    with TemporaryDirectory(dir=directory) as staging:
+        staged = Path(staging) / "download"
+        with build_opener(HTTPSRedirects()).open(request, timeout=30) as response:
+            header = response.read(11)
+            if suffix == ".deb":
+                valid = header.startswith(b"!<arch>\n")
+            else:
+                valid = header.startswith(b"\x7fELF") and header[8:11] in (b"AI\x01", b"AI\x02")
+            if not valid:
+                raise ValueError(f"The response does not look like a {suffix} package.")
+            with staged.open("wb") as output:
+                output.write(header)
+                shutil.copyfileobj(response, output)
+            length = response.headers.get("Content-Length")
+            if length and length.isdecimal() and staged.stat().st_size != int(length):
+                raise ValueError("The download is incomplete.")
+        os.link(staged, destination)
+    return destination
+
+
+def main():
+    downloads = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("url")
+    parser.add_argument("--directory", type=Path, default=Path(downloads or Path.home() / "Downloads"))
+    parser.add_argument("--name", help="Specify a filename when the URL does not include one.")
+    args = parser.parse_args()
+    try:
+        print(download(args.url, args.directory, args.name))
+    except (OSError, ValueError) as error:
+        print(f"Download failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

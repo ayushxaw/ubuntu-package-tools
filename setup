@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""Install or remove the desktop integration for the current user."""
+import argparse
+from pathlib import Path
+import re
+import shutil
+import subprocess
+
+from gi.repository import GLib
+
+PROJECT = "ubuntu-package-installer"
+DATA = Path(GLib.get_user_data_dir())
+SOURCE = Path(__file__).resolve().parent / "src"
+TOOLS = DATA / PROJECT
+EXTENSION = DATA / "nautilus-python" / "extensions" / "ubuntu_package_installer.py"
+DESKTOP = DATA / "applications" / f"{PROJECT}-gdebi.desktop"
+COMMAND = Path.home() / ".local" / "bin" / "ubuntu-package-download"
+
+
+def install():
+    if COMMAND.exists() or COMMAND.is_symlink():
+        if not COMMAND.is_symlink() or COMMAND.readlink() != TOOLS / "download-package":
+            raise SystemExit(f"Command already exists at {COMMAND}")
+
+    TOOLS.mkdir(parents=True, exist_ok=True)
+    for name in ("gdebi-wayland", "install-appimage", "download-package"):
+        target = TOOLS / name
+        shutil.copyfile(SOURCE / name, target)
+        target.chmod(0o755)
+
+    EXTENSION.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(SOURCE / EXTENSION.name, EXTENSION)
+    DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+
+    entry = GLib.KeyFile()
+    group = "Desktop Entry"
+    entry.set_string(group, "Type", "Application")
+    entry.set_string(group, "Name", "GDebi (APT in Terminal)")
+    exec_path = re.sub(r'([\\"$`])', r'\\\1', str(TOOLS / "gdebi-wayland")).replace("%", "%%")
+    entry.set_string(group, "Exec", f'"{exec_path}" %f')
+    entry.set_string(group, "Icon", "package-x-generic")
+    entry.set_string_list(group, "MimeType", ["application/vnd.debian.binary-package", "application/x-deb"])
+    entry.set_string_list(group, "Categories", ["System"])
+    entry.save_to_file(str(DESKTOP))
+
+    COMMAND.parent.mkdir(parents=True, exist_ok=True)
+    if not COMMAND.is_symlink():
+        COMMAND.symlink_to(TOOLS / "download-package")
+
+
+def uninstall():
+    if COMMAND.is_symlink() and COMMAND.readlink() == TOOLS / "download-package":
+        COMMAND.unlink()
+    EXTENSION.unlink(missing_ok=True)
+    DESKTOP.unlink(missing_ok=True)
+    for name in ("gdebi-wayland", "install-appimage", "download-package"):
+        (TOOLS / name).unlink(missing_ok=True)
+    if TOOLS.is_dir() and not any(TOOLS.iterdir()):
+        TOOLS.rmdir()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["install", "uninstall"])
+    args = parser.parse_args()
+    if args.action == "install":
+        install()
+    else:
+        uninstall()
+    if DESKTOP.parent.exists() and shutil.which("update-desktop-database"):
+        subprocess.run(["update-desktop-database", str(DESKTOP.parent)], check=True)
+    print("Run nautilus -q, then open Files again.")
+
+
+if __name__ == "__main__":
+    main()

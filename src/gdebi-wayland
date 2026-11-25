@@ -1,0 +1,58 @@
+#!/usr/bin/python3
+import argparse
+import gettext
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
+GDEBI_DATA = "/usr/share/gdebi"
+sys.path.append(GDEBI_DATA)
+from GDebi.GDebiGtk import GDebiGtk
+from gi.repository import Gtk
+
+
+class GDebiWayland(GDebiGtk):
+    def dpkg_action(self, widget, install):
+        package = getattr(self, "_deb", None)
+        if package is None:
+            return
+
+        if install:
+            cmd = ["install", "--reinstall", "--", os.path.abspath(package.filename)]
+        else:
+            cmd = ["remove", "--", package.pkgname]
+
+        # Keep the terminal open so the user can read APT's result.
+        terminal_command = '''
+/usr/bin/sudo /usr/bin/apt "$@"
+status=$?
+printf '\nPress Enter to close this window.'
+IFS= read -r _
+exit "$status"
+'''
+        try:
+            subprocess.Popen([
+                "/usr/bin/ptyxis", "-T", "GDebi Package Installer", "--",
+                "/bin/sh", "-c", terminal_command, "gdebi", *cmd,
+            ])
+        except OSError as error:
+            self.show_alert(Gtk.MessageType.ERROR, "Could not open the terminal", str(error))
+            return
+        self.window_main.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GDebi Package Installer")
+    parser.add_argument("package", nargs="?", default="")
+    args = parser.parse_args()
+    gettext.textdomain("gdebi")
+    GDebiWayland(
+        datadir=GDEBI_DATA,
+        options=SimpleNamespace(non_interactive=False, auto_close=False),
+        file=args.package,
+    ).run()
+
+
+if __name__ == "__main__":
+    main()
